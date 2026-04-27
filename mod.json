@@ -47,10 +47,8 @@
     },
     "resources": {
         "files": [
-            "resources/colorblind_texture.vert",
-            "resources/colorblind_texture.frag",
-            "resources/colorblind_color.vert",
-            "resources/colorblind_color.frag"
+            "resources/colorblind_post.vert",
+            "resources/colorblind_post.frag"
         ]
     }
 }

@@ -1,45 +1,48 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCEGLView.hpp>
 
 #include <Geode/binding/ButtonSprite.hpp>
 #include <Geode/binding/CCMenuItemSpriteExtra.hpp>
 
+#include <Geode/utils/file.hpp>
+
 #include <algorithm>
 #include <cmath>
-#include <fstream>
-#include <optional>
-#include <sstream>
 #include <string>
-#include <unordered_map>
 
 using namespace geode::prelude;
 
 namespace cb {
-    constexpr int kToggleMenuTag = 0x43535F80;
-    constexpr int kControllerTag = 0x43535F81;
+    constexpr int kControllerTag = 0x43535FA0;
 
-    constexpr char const* kTextureShaderKey = "realgares.colorblind-support/texture-filter-v3";
-    constexpr char const* kColorShaderKey   = "realgares.colorblind-support/color-filter-v3";
+    constexpr char const* kPostVertexPath = "colorblind_post.vert";
+    constexpr char const* kPostFragPath = "colorblind_post.frag";
 
-    constexpr char const* kTextureVertPath = "colorblind_texture.vert";
-    constexpr char const* kTextureFragPath = "colorblind_texture.frag";
-    constexpr char const* kColorVertPath   = "colorblind_color.vert";
-    constexpr char const* kColorFragPath   = "colorblind_color.frag";
+    static CCGLProgram* s_program;
 
-    static bool s_forceRefresh = true;
-    static CCScene* s_lastScene = nullptr;
+    /* Cached copy target for finished backbuffer. */
+    static GLuint s_frameTexture = 0;
+    static int s_frameWidth = 0;
+    static int s_frameHeight = 0;
 
-    /* Stores original shader for nodes that this mod actually touched. */
-    static std::unordered_map<CCNode*, CCGLProgram*> s_originalPrograms;
+    /* Set when OpenGL context may have changed. */
+    static bool s_graphicsDirty = true;
 
+    /* Stops repeated err spam when shader files are missing or invalid. */
+    static bool s_programBuildFailed = false;
+
+    /* Get "enabled" setting. */
     static bool enabled() {
         return Mod::get()->getSettingValue<bool>("enabled");
     }
 
+    /* Get "mode" setting. */
     static std::string mode() {
         return Mod::get()->getSettingValue<std::string>("mode");
     }
 
+    /* Get "strength" setting. */
     static float strength() {
         return static_cast<float>(std::clamp(
             Mod::get()->getSettingValue<double>("strength"),
@@ -66,332 +69,397 @@ namespace cb {
         return 0.f;
     }
 
-    static std::optional<std::string> readResourceText(char const* relativePath) {
+    static Result<std::string> readShaderSource(char const* relativePath) {
         auto path = Mod::get()->getResourcesDir() / relativePath;
-
-        std::ifstream file(path, std::ios::in | std::ios::binary);
-
-        if (!file.is_open()) {
-            log::error("Failed to open shader resource: {}", path.string());
-            return std::nullopt;
-        }
-
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-
-        auto source = buffer.str();
-
-        if (source.empty()) {
-            log::error("Shader resource is empty: {}", path.string());
-            return std::nullopt;
-        }
-
-        return source;
+        return utils::file::readString(path);
     }
 
-    static CCGLProgram* defaultTextureShader() {
-        return CCShaderCache::sharedShaderCache()->programForKey(
-            kCCShader_PositionTextureColor
-        );
-    }
-
-    static CCGLProgram* defaultColorShader() {
-        return CCShaderCache::sharedShaderCache()->programForKey(
-            kCCShader_PositionColor
-        );
-    }
-
-    static CCGLProgram* createProgram(
-        char const* key,
-        char const* vertexPath,
-        char const* fragmentPath,
-        bool usesTextureCoords
-    ) {
-        auto cache = CCShaderCache::sharedShaderCache();
-
-        if (auto existing = cache->programForKey(key)) {
-            return existing;
+    static void deleteFrameTexture() {
+        if (s_frameTexture != 0) {
+            glDeleteTextures(1, &s_frameTexture);
+            s_frameTexture = 0;
         }
 
-        auto vertexSource = readResourceText(vertexPath);
-        auto fragmentSource = readResourceText(fragmentPath);
+        s_frameWidth = 0;
+        s_frameHeight = 0;
+    }
 
-        if (!vertexSource || !fragmentSource) {
-            log::error("Failed to load shader pair: {} / {}", vertexPath, fragmentPath);
+    static void discardGraphicsHandles() {
+        s_program = nullptr;
+        s_frameTexture = 0;
+        s_frameWidth = 0;
+        s_frameHeight = 0;
+        s_programBuildFailed = false;
+    }
+
+    static void markGraphicsDirty() {
+        s_graphicsDirty = true;
+    }
+
+    static CCGLProgram* createPostProgram() {
+        auto vertexResult = readShaderSource(kPostVertexPath);
+        auto fragmentResult = readShaderSource(kPostFragPath);
+
+        if (vertexResult.isErr()) {
+            log::error(
+                "Failed to read vertex shader '{}': {}",
+                kPostVertexPath,
+                vertexResult.unwrapErr()
+            );
             return nullptr;
         }
+
+        if (fragmentResult.isErr()) {
+            log::error(
+                "Failed to read fragment shader '{}': {}",
+                kPostFragPath,
+                fragmentResult.unwrapErr()
+            );
+            return nullptr;
+        }
+
+        auto vertexSource = vertexResult.unwrap();
+        auto fragmentSource = fragmentResult.unwrap();
 
         auto program = new CCGLProgram();
 
         if (!program) {
+            log::error("Failed to allocate Colorblind Support shader program");
             return nullptr;
         }
 
         if (!program->initWithVertexShaderByteArray(
-            vertexSource->c_str(),
-            fragmentSource->c_str()
+            vertexSource.c_str(),
+            fragmentSource.c_str()
         )) {
-            log::error("Failed to initialise shader program: {}", key);
+            log::error("Failed to initialise Colorblind Support post-process shader");
             CC_SAFE_DELETE(program);
             return nullptr;
         }
 
+        /* Fullscreen pass only needs pos + texture coords. */
         program->addAttribute(kCCAttributeNamePosition, kCCVertexAttrib_Position);
-        program->addAttribute(kCCAttributeNameColor, kCCVertexAttrib_Color);
-
-        if (usesTextureCoords) {
-            program->addAttribute(kCCAttributeNameTexCoord, kCCVertexAttrib_TexCoords);
-        }
+        program->addAttribute(kCCAttributeNameTexCoord, kCCVertexAttrib_TexCoords);
 
         if (!program->link()) {
-            log::error("Failed to link shader program: {}", key);
+            log::error("Failed to link Colorblind Support post-process shader");
             CC_SAFE_DELETE(program);
             return nullptr;
         }
 
         program->updateUniforms();
 
-        cache->addProgram(program, key);
-        program->release();
-
-        return cache->programForKey(key);
+        return program;
     }
 
-    static CCGLProgram* textureProgram() {
-        return createProgram(
-            kTextureShaderKey,
-            kTextureVertPath,
-            kTextureFragPath,
-            true
+    static CCGLProgram* postProgram() {
+        if (s_graphicsDirty) {
+            discardGraphicsHandles();
+            s_graphicsDirty = false;
+        }
+
+        if (s_program) {
+            return s_program;
+        }
+
+        if (s_programBuildFailed) {
+            return nullptr;
+        }
+
+        s_program = createPostProgram();
+
+        if (!s_program) {
+            s_programBuildFailed = true;
+            return nullptr;
+        }
+
+        return s_program;
+    }
+
+    static bool ensureFrameTexture(int width, int height) {
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+
+        if (
+            s_frameTexture != 0 &&
+            s_frameWidth == width &&
+            s_frameHeight == height
+        ) {
+            return true;
+        }
+
+        /* Only runs during normal rendering when ctx is alive. */
+        deleteFrameTexture();
+
+        glGenTextures(1, &s_frameTexture);
+
+        if (s_frameTexture == 0) {
+            log::error("Failed to create Colorblind Support frame texture");
+            return false;
+        }
+
+        s_frameWidth = width;
+        s_frameHeight = height;
+
+        GLint oldActiveTexture = 0;
+        GLint oldTexture0 = 0;
+
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActiveTexture);
+
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture0);
+
+        glBindTexture(GL_TEXTURE_2D, s_frameTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        /* Clamp avoids sampling garbage outside copied frame when quad lands on edge of viewport. */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            width,
+            height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            nullptr
         );
+
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(oldTexture0));
+        glActiveTexture(static_cast<GLenum>(oldActiveTexture));
+
+        return true;
     }
 
-    static CCGLProgram* colorProgram() {
-        return createProgram(
-            kColorShaderKey,
-            kColorVertPath,
-            kColorFragPath,
-            false
-        );
-    }
-
-    static void updateProgramUniforms(CCGLProgram* program) {
+    static void updateUniforms(CCGLProgram* program) {
         if (!program) {
             return;
         }
 
         program->use();
 
+        auto textureLocation = program->getUniformLocationForName("u_texture");
         auto strengthLocation = program->getUniformLocationForName("u_strength");
         auto modeLocation = program->getUniformLocationForName("u_mode");
 
+        program->setUniformLocationWith1i(textureLocation, 0);
         program->setUniformLocationWith1f(strengthLocation, strength());
         program->setUniformLocationWith1f(modeLocation, modeIndex());
     }
 
-    static void updateShaderUniforms() {
-        updateProgramUniforms(textureProgram());
-        updateProgramUniforms(colorProgram());
+    static void drawFullscreenQuad() {
+        struct Vertex {
+            GLfloat x;
+            GLfloat y;
+            GLfloat u;
+            GLfloat v;
+        };
+
+        /* Tex coords match `glCopyTexSubImage2D` lower-left origin. */
+        static constexpr Vertex vertices[] = {
+            { -1.f, -1.f, 0.f, 0.f },
+            {  1.f, -1.f, 1.f, 0.f },
+            { -1.f,  1.f, 0.f, 1.f },
+            {  1.f,  1.f, 1.f, 1.f }
+        };
+
+        glEnableVertexAttribArray(kCCVertexAttrib_Position);
+        glEnableVertexAttribArray(kCCVertexAttrib_TexCoords);
+
+        glVertexAttribPointer(
+            kCCVertexAttrib_Position,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(Vertex),
+            &vertices[0].x
+        );
+
+        glVertexAttribPointer(
+            kCCVertexAttrib_TexCoords,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(Vertex),
+            &vertices[0].u
+        );
+
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 
-    template <class T>
-    static void applyProgramToNode(
-        T* renderNode,
-        CCGLProgram* filterProgram,
-        CCGLProgram* fallbackProgram
-    ) {
-        if (!renderNode || !filterProgram) {
+    static void applyPostProcess() {
+        auto amount = strength();
+
+        if (!enabled() || amount <= 0.001f) {
             return;
         }
 
-        auto node = static_cast<CCNode*>(renderNode);
+        auto program = postProgram();
 
-        if (node->getTag() == kToggleMenuTag || node->getTag() == kControllerTag) {
+        if (!program) {
             return;
         }
 
-        auto current = renderNode->getShaderProgram();
-        auto stored = s_originalPrograms.find(node);
+        GLint viewport[4] = { 0, 0, 0, 0 };
+        glGetIntegerv(GL_VIEWPORT, viewport);
 
-        /* Only stock/default shaders are safe to replace. */
-        auto hasCustomShader =
-            current &&
-            current != fallbackProgram &&
-            current != filterProgram;
+        auto width = viewport[2];
+        auto height = viewport[3];
 
-        if (enabled()) {
-            if (hasCustomShader) {
-                if (stored != s_originalPrograms.end()) {
-                    s_originalPrograms.erase(stored);
-                }
-
-                return;
-            }
-
-            if (current == filterProgram) {
-                return;
-            }
-
-            s_originalPrograms[node] = current ? current : fallbackProgram;
-            renderNode->setShaderProgram(filterProgram);
+        if (!ensureFrameTexture(width, height)) {
             return;
         }
 
-        /**
-         * Disabled path.
-         *
-         * Restore only if node still uses this mod's shader. If another mod
-         * changed it after this mod touched it, leave that shader alone.
-         */
-        if (stored != s_originalPrograms.end()) {
-            if (current == filterProgram) {
-                renderNode->setShaderProgram(
-                    stored->second ? stored->second : fallbackProgram
-                );
-            }
+        /* Preserve bits of GL state most likely to matter if another hook renders after this one. */
+        GLint oldProgram = 0;
+        GLint oldActiveTexture = 0;
+        GLint oldTexture0 = 0;
+        GLint oldArrayBuffer = 0;
+        GLint oldViewport[4] = { 0, 0, 0, 0 };
 
-            s_originalPrograms.erase(stored);
-            return;
+        GLboolean oldBlend = glIsEnabled(GL_BLEND);
+        GLboolean oldDepthTest = glIsEnabled(GL_DEPTH_TEST);
+        GLboolean oldScissorTest = glIsEnabled(GL_SCISSOR_TEST);
+        GLboolean oldCullFace = glIsEnabled(GL_CULL_FACE);
+
+        glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActiveTexture);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &oldArrayBuffer);
+        glGetIntegerv(GL_VIEWPORT, oldViewport);
+
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture0);
+
+        /* Copy frame after GD, particles, menus, custom shaders and mod UI have already rendered. */
+        glBindTexture(GL_TEXTURE_2D, s_frameTexture);
+        glCopyTexSubImage2D(
+            GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            viewport[0],
+            viewport[1],
+            width,
+            height
+        );
+
+        /* Fullscreen replacement pass. */
+        if (oldBlend) {
+            glDisable(GL_BLEND);
         }
 
-        /* Hot reload. */
-        if (current == filterProgram) {
-            renderNode->setShaderProgram(fallbackProgram);
+        if (oldDepthTest) {
+            glDisable(GL_DEPTH_TEST);
         }
+
+        if (oldScissorTest) {
+            glDisable(GL_SCISSOR_TEST);
+        }
+
+        if (oldCullFace) {
+            glDisable(GL_CULL_FACE);
+        }
+
+        glViewport(viewport[0], viewport[1], width, height);
+
+        program->use();
+        updateUniforms(program);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, s_frameTexture);
+
+        drawFullscreenQuad();
+
+        /* Put GL state back. */
+        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(oldArrayBuffer));
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(oldTexture0));
+
+        glActiveTexture(static_cast<GLenum>(oldActiveTexture));
+        glUseProgram(static_cast<GLuint>(oldProgram));
+
+        if (oldBlend) {
+            glEnable(GL_BLEND);
+        }
+        else {
+            glDisable(GL_BLEND);
+        }
+
+        if (oldDepthTest) {
+            glEnable(GL_DEPTH_TEST);
+        }
+        else {
+            glDisable(GL_DEPTH_TEST);
+        }
+
+        if (oldScissorTest) {
+            glEnable(GL_SCISSOR_TEST);
+        }
+        else {
+            glDisable(GL_SCISSOR_TEST);
+        }
+
+        if (oldCullFace) {
+            glEnable(GL_CULL_FACE);
+        }
+        else {
+            glDisable(GL_CULL_FACE);
+        }
+
+        glViewport(
+            oldViewport[0],
+            oldViewport[1],
+            oldViewport[2],
+            oldViewport[3]
+        );
     }
 
-    static void applyShaderTree(CCNode* node) {
-        if (!node) {
-            return;
-        }
-
-        if (node->getTag() == kToggleMenuTag || node->getTag() == kControllerTag) {
-            return;
-        }
-
-        /* Apply the shader to the batch owner. */
-        if (auto batch = typeinfo_cast<CCSpriteBatchNode*>(node)) {
-            applyProgramToNode(batch, textureProgram(), defaultTextureShader());
-            return;
-        }
-
-        if (auto sprite = typeinfo_cast<CCSprite*>(node)) {
-            applyProgramToNode(sprite, textureProgram(), defaultTextureShader());
-        }
-        else if (auto colorLayer = typeinfo_cast<CCLayerColor*>(node)) {
-            applyProgramToNode(colorLayer, colorProgram(), defaultColorShader());
-        }
-
-        for (auto child : node->getChildrenExt<CCNode*>()) {
-            applyShaderTree(child);
-        }
-    }
-
-    static void refreshRunningScene() {
-        auto scene = CCDirector::sharedDirector()->getRunningScene();
-
-        if (!scene) {
-            return;
-        }
-
-        if (scene != s_lastScene) {
-            s_lastScene = scene;
-            s_originalPrograms.clear();
-            s_forceRefresh = true;
-        }
-
-        updateShaderUniforms();
-        applyShaderTree(scene);
-    }
-
-    static void requestRefresh() {
-        s_forceRefresh = true;
-    }
-
-    class GlobalController final : public CCNode {
-    public:
-        float m_timer = 0.f;
-
-        bool m_hasState = false;
-        bool m_lastEnabled = false;
-        float m_lastStrength = -1.f;
-        float m_lastMode = -1.f;
-
-        static GlobalController* create() {
-            auto ret = new GlobalController();
-
-            if (ret && ret->init()) {
-                ret->autorelease();
-                return ret;
-            }
-
-            CC_SAFE_DELETE(ret);
+    static CCMenu* findMenuLayerButtonHost(MenuLayer* layer) {
+        if (!layer) {
             return nullptr;
         }
 
-        bool init() override {
-            if (!CCNode::init()) {
-                return false;
-            }
-
-            this->scheduleUpdate();
-            return true;
+        if (auto menu = typeinfo_cast<CCMenu*>(layer->getChildByID("right-side-menu"))) {
+            return menu;
+        }
+        if (auto menu = typeinfo_cast<CCMenu*>(layer->getChildByID("bottom-menu"))) {
+            return menu;
         }
 
-        void update(float dt) override {
-            m_timer += dt;
-
-            auto nowEnabled = enabled();
-            auto nowStrength = strength();
-            auto nowMode = modeIndex();
-
-            auto settingsChanged =
-                !m_hasState ||
-                m_lastEnabled != nowEnabled ||
-                std::abs(m_lastStrength - nowStrength) > 0.0001f ||
-                std::abs(m_lastMode - nowMode) > 0.0001f;
-
-            if (s_forceRefresh || settingsChanged || m_timer >= 0.12f) {
-                refreshRunningScene();
-
-                s_forceRefresh = false;
-                m_timer = 0.f;
-
-                m_hasState = true;
-                m_lastEnabled = nowEnabled;
-                m_lastStrength = nowStrength;
-                m_lastMode = nowMode;
-            }
-        }
-    };
-
-    static void installGlobalController() {
-        auto director = CCDirector::sharedDirector();
-
-        if (!director) {
-            return;
-        }
-
-        auto host = director->getNotificationNode();
-
-        if (!host) {
-            host = CCNode::create();
-            director->setNotificationNode(host);
-        }
-
-        if (host->getChildByTag(kControllerTag)) {
-            return;
-        }
-
-        auto controller = GlobalController::create();
-
-        if (!controller) {
-            return;
-        }
-
-        controller->setTag(kControllerTag);
-        host->addChild(controller);
+        return nullptr;
     }
+
+    static ButtonSprite* createToggleSprite() {
+        auto sprite = ButtonSprite::create("CB");
+
+        if (!sprite) {
+            return nullptr;
+        }
+
+        sprite->setScale(0.66f);
+
+        sprite->setColor(
+            enabled()
+                ? ccc3(105, 255, 85)
+                : ccc3(255, 95, 90)
+        );
+
+        return sprite;
+    }
+}
+
+$on_mod(Loaded) {
+    cb::markGraphicsDirty();
+}
+
+$on_game(TexturesLoaded) {
+    cb::markGraphicsDirty();
 }
 
 class $modify(CBMenuLayer, MenuLayer) {
@@ -400,35 +468,31 @@ class $modify(CBMenuLayer, MenuLayer) {
             return false;
         }
 
-        cb::installGlobalController();
-
         this->addColorblindToggleButton();
 
-        /* `MenuLayer::init` can run before every sprite has settled. */
-        cb::requestRefresh();
+        /* Force lazy shader rebuild after returning to menu. */
+        cb::markGraphicsDirty();
 
         return true;
     }
 
     void addColorblindToggleButton() {
-        if (auto oldMenu = this->getChildByTag(cb::kToggleMenuTag)) {
-            oldMenu->removeFromParentAndCleanup(true);
+        auto menu = cb::findMenuLayerButtonHost(this);
+
+        if (!menu) {
+            log::warn("Could not find a MenuLayer menu for the Colorblind Support toggle");
+            return;
         }
 
-        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        if (auto oldButton = menu->getChildByID("toggle-button"_spr)) {
+            oldButton->removeFromParentAndCleanup(true);
+        }
 
-        auto menu = CCMenu::create();
-        menu->setTag(cb::kToggleMenuTag);
-        menu->setPosition(ccp(winSize.width - 42.f, winSize.height - 32.f));
+        auto sprite = cb::createToggleSprite();
 
-        auto sprite = ButtonSprite::create("CB");
-        sprite->setScale(0.66f);
-
-        sprite->setColor(
-            cb::enabled()
-                ? ccc3(105, 255, 85)
-                : ccc3(255, 95, 80)
-        );
+        if (!sprite) {
+            return;
+        }
 
         auto button = CCMenuItemSpriteExtra::create(
             sprite,
@@ -436,10 +500,22 @@ class $modify(CBMenuLayer, MenuLayer) {
             menu_selector(CBMenuLayer::onColorblindToggle)
         );
 
+        if (!button) {
+            return;
+        }
+
+        button->setID("toggle-button"_spr);
         button->setScale(0.82f);
+
         menu->addChild(button);
 
-        this->addChild(menu, 9999);
+        /* Let existing menu layout place button. */
+        if (menu->getLayout()) {
+            menu->updateLayout();
+        }
+        else {
+            button->setPositionX(button->getPositionX() - 42.f);
+        }
     }
 
     void onColorblindToggle(CCObject*) {
@@ -447,9 +523,16 @@ class $modify(CBMenuLayer, MenuLayer) {
 
         Mod::get()->setSettingValue<bool>("enabled", next);
 
+        /* Recreate button so color reflects new state immediately. */
         this->addColorblindToggleButton();
+    }
+};
 
-        cb::requestRefresh();
-        cb::refreshRunningScene();
+class $modify(CBCCEGLView, CCEGLView) {
+    void swapBuffers() {
+        /* Apply filter AFTER frame has drawn but before backbuffer is presented. */
+        cb::applyPostProcess();
+
+        CCEGLView::swapBuffers();
     }
 };

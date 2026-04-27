@@ -3,11 +3,12 @@ precision mediump float;
 #endif
 
 #ifdef GL_ES
-varying lowp vec4 v_fragmentColor;
+varying mediump vec2 v_texCoord;
 #else
-varying vec4 v_fragmentColor;
+varying vec2 v_texCoord;
 #endif
 
+uniform sampler2D u_texture;
 uniform float u_strength;
 uniform float u_mode;
 
@@ -26,14 +27,14 @@ vec3 protanopia(vec3 c) {
     return clampColor(vec3(
             dot(c, vec3(0.152286, 1.052583, -0.204868)),
             dot(c, vec3(0.114503, 0.786281,  0.099216)),
-            dot(c, vec3(-0.003882,-0.048116,  1.051998))));
+            dot(c, vec3(-0.003882, -0.048116, 1.051998))));
 }
 
 vec3 tritanopia(vec3 c) {
     return clampColor(vec3(
-            dot(c, vec3(1.255528,-0.076749, -0.178779)),
-            dot(c, vec3(-0.078411, 0.930809,  0.147602)),
-            dot(c, vec3(0.004733, 0.691367,  0.303900))));
+            dot(c, vec3(1.255528, -0.076749, -0.178779)),
+            dot(c, vec3(-0.078411,  0.930809,  0.147602)),
+            dot(c, vec3(0.004733,  0.691367,  0.303900))));
 }
 
 vec3 achromatopsia(vec3 c) {
@@ -67,7 +68,7 @@ vec3 applyFilter(vec3 c) {
 }
 
 void main() {
-    vec4 original = v_fragmentColor;
+    vec4 original = texture2D(u_texture, v_texCoord);
 
     if (original.a <= 0.001 || u_strength <= 0.001) {
         gl_FragColor = original;

@@ -1,5 +1,6 @@
 # 1.0.2
 - Cleaner hooking code
+- Added notification popup
 
 # 1.0.1
 - Fixed issues with shader applying after 1 frame

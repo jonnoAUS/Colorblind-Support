@@ -10,7 +10,6 @@ It applies a lightweight visual filter over standard GD sprites and color layers
 - <ca>Deuteranopia</ca>, <ca>Protanopia</ca>, <ca>Tritanopia</ca> and <ca>Achromatopsia</ca> modes
 - Adjustable filter <cy>strength</cy>
 - Quick <cy>CB</cy> toggle button on the main menu
-- Skips objects that already use custom shaders where possible
 
 ## <cy>Settings</cy>
 
@@ -26,5 +25,3 @@ It applies a lightweight visual filter over standard GD sprites and color layers
 ## <cy>Notes</cy>
 
 This mod changes how the game is displayed. It does <cr>not</cr> edit levels, objects, colors or saved data.
-
-Some custom shader effects from other mods or levels may be skipped so their original rendering is preserved.

@@ -3,8 +3,9 @@
 #include <Geode/modify/CCEGLView.hpp>
 
 #include <Geode/binding/ButtonSprite.hpp>
-#include <Geode/binding/CCMenuItemSpriteExtra.hpp>
+#include <Geode/binding/CCMenuItemToggler.hpp>
 
+#include <Geode/ui/Notification.hpp>
 #include <Geode/utils/file.hpp>
 
 #include <algorithm>
@@ -435,7 +436,7 @@ namespace cb {
         return nullptr;
     }
 
-    static ButtonSprite* createToggleSprite() {
+    static ButtonSprite* createToggleSprite(bool active) {
         auto sprite = ButtonSprite::create("CB");
 
         if (!sprite) {
@@ -445,7 +446,7 @@ namespace cb {
         sprite->setScale(0.66f);
 
         sprite->setColor(
-            enabled()
+            active
                 ? ccc3(105, 255, 85)
                 : ccc3(255, 95, 90)
         );
@@ -468,54 +469,39 @@ class $modify(CBMenuLayer, MenuLayer) {
             return false;
         }
 
-        this->addColorblindToggleButton();
-
-        /* Force lazy shader rebuild after returning to menu. */
-        cb::markGraphicsDirty();
-
-        return true;
-    }
-
-    void addColorblindToggleButton() {
         auto menu = cb::findMenuLayerButtonHost(this);
 
         if (!menu) {
-            log::warn("Could not find a MenuLayer menu for the Colorblind Support toggle");
-            return;
+            log::warn("Could not find MenuLayer menu for Colorblind Support toggle");
+            return true;
         }
 
-        if (auto oldButton = menu->getChildByID("toggle-button"_spr)) {
-            oldButton->removeFromParentAndCleanup(true);
+        if (!menu->getChildByID("toggle-button"_spr)) {
+            auto toggler = CCMenuItemToggler::create(
+                cb::createToggleSprite(false),
+                cb::createToggleSprite(true),
+                this,
+                menu_selector(CBMenuLayer::onColorblindToggle)
+            );
+
+            if (toggler) {
+                toggler->setID("toggle-button"_spr);
+                toggler->setScale(0.82f);
+
+                /* Sync initial visual state with saved setting. */
+                toggler->toggle(cb::enabled());
+
+                menu->addChild(toggler);
+
+                /* Let existing menu place new item. */
+                if (menu->getLayout()) {
+                    menu->updateLayout();
+                }
+            }
         }
 
-        auto sprite = cb::createToggleSprite();
-
-        if (!sprite) {
-            return;
-        }
-
-        auto button = CCMenuItemSpriteExtra::create(
-            sprite,
-            this,
-            menu_selector(CBMenuLayer::onColorblindToggle)
-        );
-
-        if (!button) {
-            return;
-        }
-
-        button->setID("toggle-button"_spr);
-        button->setScale(0.82f);
-
-        menu->addChild(button);
-
-        /* Let existing menu layout place button. */
-        if (menu->getLayout()) {
-            menu->updateLayout();
-        }
-        else {
-            button->setPositionX(button->getPositionX() - 42.f);
-        }
+        cb::markGraphicsDirty();
+        return true;
     }
 
     void onColorblindToggle(CCObject*) {
@@ -523,14 +509,17 @@ class $modify(CBMenuLayer, MenuLayer) {
 
         Mod::get()->setSettingValue<bool>("enabled", next);
 
-        /* Recreate button so color reflects new state immediately. */
-        this->addColorblindToggleButton();
+        Notification::create(
+            next ? "Colorblind Support enabled" : "Colorblind Support disabled",
+            next ? NotificationIcon::Success : NotificationIcon::Info,
+            0.8f
+        )->show();
     }
 };
 
 class $modify(CBCCEGLView, CCEGLView) {
     void swapBuffers() {
-        /* Apply filter AFTER frame has drawn but before backbuffer is presented. */
+        /* Apply filter AFTER frame has drawn but BEFORE backbuffer is presented. */
         cb::applyPostProcess();
 
         CCEGLView::swapBuffers();

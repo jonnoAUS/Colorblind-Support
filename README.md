@@ -1,20 +1,30 @@
-# No More Beat Pulses
+# Colorblind Support
 
-No More Beat Pulses exists for one simple reason: to make some levels feel a little less distracting.
+Colorblind Support adds shader-based colorblind display adjustment to Geometry Dash.
 
-A lot of objects in Geometry Dash use subtle beat pulsing, which can look nice but in some levels it can also make it harder to focus on gameplay or read the screen comfortably.
+It applies a lightweight visual filter over standard GD sprites and color layers, making the game easier to read for players with different types of color vision deficiency.
 
-This mod disables those beat pulses on selected objects so the game looks a bit more stable, clean and easier to focus on.
+## Features
 
-## Why use it?
+- Shader-based color adjustment
+- Deuteranopia, Protanopia, Tritanopia and Achromatopsia modes
+- Adjustable filter strength
+- Quick CB toggle button on the main menu
+- Skips objects that already use custom shaders where possible
 
-- Less visual noise
-- Easier to focus on what matters
-- Cleaner-looking gameplay and decoration
-- Great for those who prefer a more static look
+## Settings
 
-Made for players who just want the level to "chill out a bit."
+- Enabled
+  Turns the filter on or off.
 
-# Any issues?
+- Colorblind Mode
+  Selects the active colorblind profile.
 
-Open an issue on the [github](https://github.com/jonnoAUS/No-More-Beat-Pulses/issues) repo
+- Strength
+  Controls how strongly the selected profile affects the game.
+
+## Notes
+
+This mod changes how the game is displayed. It does not edit levels, objects, colors or saved data.
+
+Some custom shader effects from other mods or levels may be skipped so their original rendering is preserved.

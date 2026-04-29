@@ -6,7 +6,7 @@
     },
     "id": "realgares.colorblind-support",
     "name": "Colorblind Support",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "developer": "RealGares",
     "description": "Colorblind support for Geometry Dash!",
     "tags": [ "customization", "utility", "enhancement"],
@@ -15,7 +15,7 @@
             "type": "bool",
             "name": "Enabled",
             "description": "Enables or disables the colorblind filter.",
-            "default": true
+            "default": false
         },
         "mode": {
             "type": "string",
@@ -33,7 +33,7 @@
             "type": "float",
             "name": "Strength",
             "description": "Controls how strongly the selected colorblind filter is applied.",
-            "default": 0.8,
+            "default": 0.3,
             "min": 0,
             "max": 1,
             "control": {

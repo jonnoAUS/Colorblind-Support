@@ -1,3 +1,6 @@
+# v1.0.4
+- Added iOS + macOS support
+
 # v1.0.3
 (Thanks SMJS!)
 - Reduced default strength

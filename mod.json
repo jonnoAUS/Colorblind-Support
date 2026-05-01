@@ -8,7 +8,7 @@
     },
     "id": "realgares.colorblind-support",
     "name": "Colorblind Support",
-    "version": "1.0.3",
+    "version": "v1.0.4",
     "developer": "RealGares",
     "description": "Colorblind support for Geometry Dash!",
     "tags": [ "customization", "utility", "enhancement"],

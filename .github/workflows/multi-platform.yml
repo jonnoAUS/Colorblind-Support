@@ -15,10 +15,10 @@ jobs:
         - name: Windows
           os: windows-latest
 
-        #- name: macOS
+         name: macOS
           #os: macos-latest
 
-        #- name: iOS
+         name: iOS
           #os: macos-latest
           #target: iOS
 
